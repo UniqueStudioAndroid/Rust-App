@@ -5,7 +5,11 @@ authors = ["little-csd <littlecsd@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-
+skia-safe = "0.1"
+android_logger = "0.10"
+log = "0.4"
+ndk-sys = "0.2"
+lazy_static = "1.4"
 
 [lib]
 crate-type = ["cdylib"]
