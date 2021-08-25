@@ -7,17 +7,18 @@ edition = "2018"
 [dependencies]
 android_logger = "0.10"
 log = "0.4"
-#ndk-sys = "0.2"
-lazy_static = "1.4"
-ash = "0.33"
-handle = "1.0.0"
-ash-window = "0.7.0"
 raw-window-handle = "0.3.3"
 libc = "0.2"
+#sparkle = "0.1.25"
 
 [dependencies.skia-safe]
 version = "0.41.0"
-features = ["vulkan", "gpu"]
+#features = ["vulkan", "gpu"]
+features = ["gl", "gpu"]
+
+[dependencies.surfman]
+version = "0.4.3"
+features = ["sm-raw-window-handle"]
 
 [lib]
 crate-type = ["cdylib"]
