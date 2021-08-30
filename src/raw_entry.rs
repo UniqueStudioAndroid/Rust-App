@@ -1,7 +1,6 @@
 use std::{convert::TryInto, ffi::CString, os::raw, path::Path, ptr};
 use std::borrow::Borrow;
 use std::ops::Deref;
-use std::thread::sleep;
 use std::time::Duration;
 
 use android_logger::Config;
@@ -11,15 +10,12 @@ use self::egl::NativeWindowType;
 use skia_safe::gpu::gl::Interface;
 use skia_safe::gpu::ContextOptions;
 
+use crate::window::ANativeWindow;
+use crate::window::window::Window;
+
 extern crate khronos_egl as egl;
 
 pub type SizeT = raw::c_ulong;
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct ANativeWindow {
-    _unused: [u8; 0],
-}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -36,117 +32,6 @@ pub struct ARect {
     pub bottom: i32,
 }
 
-struct Window {
-    // gl_context: GLContext<NativeGLContext>,
-    render_context: gpu::DirectContext,
-    egl: egl::Instance<egl::Static>,
-    display: egl::Display,
-    surface: egl::Surface,
-    width: i32,
-    height: i32,
-}
-
-impl Window {
-    fn draw(&mut self) {
-        // let img_info = ImageInfo::new_n32_premul((self.width, self.height), None);
-        // let mut sk_surface = skia_safe::Surface::new_render_target(
-        //     &mut self.render_context, Budgeted::No, &img_info, None, gpu::SurfaceOrigin::TopLeft, None, false,
-        // ).unwrap();
-        let fb_info = skia_safe::gpu::gl::FramebufferInfo {
-            fboid: 0,
-            format: skia_safe::gpu::gl::Format::RGBA8.into(),
-        };
-        let backend_rt = skia_safe::gpu::BackendRenderTarget::new_gl(
-            (self.width, self.height),
-            None,
-            0,
-            fb_info
-        );
-        let mut sk_surface = skia_safe::Surface::from_backend_render_target(
-            &mut self.render_context,
-            &backend_rt,
-            gpu::SurfaceOrigin::TopLeft,
-            skia_safe::ColorType::RGBA8888,
-            None,
-            None
-        ).expect("Create skia surface failed");
-
-        let canvas = sk_surface.canvas();
-        use skia_safe::{Rect, Color4f, ColorSpace, Paint};
-        let rect = Rect {
-            left: 300.0,
-            right: 700.0,
-            top: 500.0,
-            bottom: 1000.0,
-        };
-        let color = Color4f {
-            r: 1.0,
-            g: 0.0,
-            b: 0.0,
-            a: 1.0,
-        };
-        let color_space = ColorSpace::new_srgb();
-        let paint = Paint::new(&color, Some(&color_space));
-        canvas.draw_rect(rect, &paint);
-        sk_surface.flush_submit_and_sync_cpu();
-        self.swap_buffers();
-
-        info!("Window draw ok...");
-    }
-
-    fn swap_buffers(&self) {
-        self.egl.swap_buffers(self.display, self.surface);
-    }
-
-    fn from_window_ptr(window_ptr: *mut ANativeWindow) -> Self {
-        let egl = egl::Instance::new(egl::Static);
-        let display = egl.get_display(egl::DEFAULT_DISPLAY).unwrap();
-        egl.initialize(display).expect("unable to initialize default display");
-        assert_ne!(display.as_ptr(), egl::NO_DISPLAY);
-
-        egl.bind_api(egl::OPENGL_ES_API).expect("unable to bind opengl es api");
-
-        let attributes = [
-            egl::RED_SIZE, 8,
-            egl::GREEN_SIZE, 8,
-            egl::BLUE_SIZE, 8,
-            egl::NONE
-        ];
-        let config = egl.choose_first_config(display, &attributes).expect("unable to find an appropriate ELG configuration").unwrap();
-
-        let context_attributes = [
-            egl::CONTEXT_MAJOR_VERSION, 3,
-            egl::NONE
-        ];
-        let context = egl.create_context(display, config, None, &context_attributes).expect("unable to create egl context");
-        assert_ne!(context.as_ptr(), egl::NO_CONTEXT);
-
-        unsafe {
-            let surface = egl.create_window_surface(display, config, window_ptr as NativeWindowType, None).expect("create window surface failed");
-            assert_ne!(surface.as_ptr(), egl::NO_SURFACE);
-
-            egl.make_current(display, Some(surface), Some(surface), Some(context)).expect("unable to make current");
-
-            let width = ANativeWindow_getWidth(window_ptr);
-            let height = ANativeWindow_getHeight(window_ptr);
-
-            info!("Native window created ok with width = {:?}, height = {:?}", width, height);
-
-            Window {
-                render_context: gpu::DirectContext::new_gl(
-                    None,
-                    None,
-                ).unwrap(),
-                egl,
-                display,
-                surface,
-                width,
-                height,
-            }
-        }
-    }
-}
-
 struct App {
     window: Option<Window>,
 }
@@ -154,6 +39,7 @@ struct App {
 extern "C" {
     pub fn ANativeWindow_getWidth(window: *mut ANativeWindow) -> i32;
     pub fn ANativeWindow_getHeight(window: *mut ANativeWindow) -> i32;
+    pub fn ANativeWindow_release(window: *mut ANativeWindow);
 }
 
 impl App {
@@ -236,24 +122,16 @@ pub struct ANativeActivity {
 
 pub extern "C" fn on_window_created(activity: *mut ANativeActivity, window_ptr: *mut ANativeWindow) {
     info!("Native window created, window = {:?}", window_ptr);
-    // let app = App::get_app(activity);
-    // match app.window {
-    //     None => {}
-    //     _ => {}
-    // }
+    let app = App::get_app(activity);
+    if let None = &app.window {
+        app.window = Some(Window::from_native_window(window_ptr));
+    } else {
+        error!("window created without destroyed the last one");
+    }
 }
 
 pub extern "C" fn on_window_resized(activity: *mut ANativeActivity, window_ptr: *mut ANativeWindow) {
-    unsafe {
-        let width = ANativeWindow_getWidth(window_ptr);
-        let height = ANativeWindow_getHeight(window_ptr);
-
-        info!("Native window resized, window = {:?}, width = {:?}, height = {:?}", window_ptr, width, height);
-    }
-    let app = App::get_app(activity);
-    if let None = &app.window {
-        app.window = Some(Window::from_window_ptr(window_ptr))
-    }
+    info!("Native window resized, window = {:?}", window_ptr);
     // let app = App::get_app(activity);
     // match &mut app.window {
     //     Some(window) => {
@@ -269,8 +147,16 @@ pub extern "C" fn on_window_resized(activity: *mut ANativeActivity, window_ptr: 
 
 pub extern "C" fn on_window_redraw(activity: *mut ANativeActivity, window_ptr: *mut ANativeWindow) {
     info!("Native window redraw, window = {:?}", window_ptr);
+    let window = &mut App::get_app(activity).window;
+    if let Some(window) = window {
+        window.on_paint();
+    }
+}
+
+pub extern "C" fn on_window_destroyed(activity: *mut ANativeActivity, window_ptr: *mut ANativeWindow) {
+    info!("Native window destroyed, window = {:?}", window_ptr);
     let app = App::get_app(activity);
-    app.window.as_mut().unwrap().draw();
+    app.window = None;
 }
 
 #[no_mangle]
@@ -300,6 +186,7 @@ pub extern "C" fn ANativeActivity_onCreate(
         callbacks.on_native_window_created = Some(on_window_created);
         callbacks.on_native_window_resized = Some(on_window_resized);
         callbacks.on_native_window_redraw_needed = Some(on_window_redraw);
+        callbacks.on_native_window_destroyed = Some(on_window_destroyed);
         // callbacks.onInputQueueCreated = Some(on_input_queue_created);
         // callbacks.onInputQueueDestroyed = Some(on_input_queue_destroyed);
 

@@ -2,6 +2,8 @@
 
 // pub mod entry;
 
+pub mod window;
+
 // pub mod window;
 // pub mod android;
 // pub mod looper;
