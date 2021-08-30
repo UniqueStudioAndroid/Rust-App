@@ -6,8 +6,12 @@ use std::time::Duration;
 
 use android_logger::Config;
 use log::Level;
-use raw_window_handle::RawWindowHandle;
 use skia_safe::{Budgeted, Canvas, gpu, ImageInfo};
+use self::egl::NativeWindowType;
+use skia_safe::gpu::gl::Interface;
+use skia_safe::gpu::ContextOptions;
+
+extern crate khronos_egl as egl;
 
 pub type SizeT = raw::c_ulong;
 
@@ -35,17 +39,39 @@ pub struct ARect {
 struct Window {
     // gl_context: GLContext<NativeGLContext>,
     render_context: gpu::DirectContext,
+    egl: egl::Instance<egl::Static>,
+    display: egl::Display,
+    surface: egl::Surface,
     width: i32,
     height: i32,
 }
 
 impl Window {
     fn draw(&mut self) {
-        let img_info = ImageInfo::new_n32_premul((self.width, self.height), None);
-        let mut surface = skia_safe::Surface::new_render_target(
-            &mut self.render_context, Budgeted::Yes, &img_info, None, gpu::SurfaceOrigin::TopLeft, None, false,
-        ).unwrap();
-        let canvas = surface.canvas();
+        // let img_info = ImageInfo::new_n32_premul((self.width, self.height), None);
+        // let mut sk_surface = skia_safe::Surface::new_render_target(
+        //     &mut self.render_context, Budgeted::No, &img_info, None, gpu::SurfaceOrigin::TopLeft, None, false,
+        // ).unwrap();
+        let fb_info = skia_safe::gpu::gl::FramebufferInfo {
+            fboid: 0,
+            format: skia_safe::gpu::gl::Format::RGBA8.into(),
+        };
+        let backend_rt = skia_safe::gpu::BackendRenderTarget::new_gl(
+            (self.width, self.height),
+            None,
+            0,
+            fb_info
+        );
+        let mut sk_surface = skia_safe::Surface::from_backend_render_target(
+            &mut self.render_context,
+            &backend_rt,
+            gpu::SurfaceOrigin::TopLeft,
+            skia_safe::ColorType::RGBA8888,
+            None,
+            None
+        ).expect("Create skia surface failed");
+
+        let canvas = sk_surface.canvas();
         use skia_safe::{Rect, Color4f, ColorSpace, Paint};
         let rect = Rect {
             left: 300.0,
@@ -62,7 +88,62 @@ impl Window {
         let color_space = ColorSpace::new_srgb();
         let paint = Paint::new(&color, Some(&color_space));
         canvas.draw_rect(rect, &paint);
-        surface.flush_and_submit();
+        sk_surface.flush_submit_and_sync_cpu();
+        self.swap_buffers();
+
+        info!("Window draw ok...");
+    }
+
+    fn swap_buffers(&self) {
+        self.egl.swap_buffers(self.display, self.surface);
+    }
+
+    fn from_window_ptr(window_ptr: *mut ANativeWindow) -> Self {
+        let egl = egl::Instance::new(egl::Static);
+        let display = egl.get_display(egl::DEFAULT_DISPLAY).unwrap();
+        egl.initialize(display).expect("unable to initialize default display");
+        assert_ne!(display.as_ptr(), egl::NO_DISPLAY);
+
+        egl.bind_api(egl::OPENGL_ES_API).expect("unable to bind opengl es api");
+
+        let attributes = [
+            egl::RED_SIZE, 8,
+            egl::GREEN_SIZE, 8,
+            egl::BLUE_SIZE, 8,
+            egl::NONE
+        ];
+        let config = egl.choose_first_config(display, &attributes).expect("unable to find an appropriate ELG configuration").unwrap();
+
+        let context_attributes = [
+            egl::CONTEXT_MAJOR_VERSION, 3,
+            egl::NONE
+        ];
+        let context = egl.create_context(display, config, None, &context_attributes).expect("unable to create egl context");
+        assert_ne!(context.as_ptr(), egl::NO_CONTEXT);
+
+        unsafe {
+            let surface = egl.create_window_surface(display, config, window_ptr as NativeWindowType, None).expect("create window surface failed");
+            assert_ne!(surface.as_ptr(), egl::NO_SURFACE);
+
+            egl.make_current(display, Some(surface), Some(surface), Some(context)).expect("unable to make current");
+
+            let width = ANativeWindow_getWidth(window_ptr);
+            let height = ANativeWindow_getHeight(window_ptr);
+
+            info!("Native window created ok with width = {:?}, height = {:?}", width, height);
+
+            Window {
+                render_context: gpu::DirectContext::new_gl(
+                    None,
+                    None,
+                ).unwrap(),
+                egl,
+                display,
+                surface,
+                width,
+                height,
+            }
+        }
     }
 }
 
@@ -72,9 +153,6 @@ struct App {
 
 extern "C" {
     pub fn ANativeWindow_getWidth(window: *mut ANativeWindow) -> i32;
-}
-
-extern "C" {
     pub fn ANativeWindow_getHeight(window: *mut ANativeWindow) -> i32;
 }
 
@@ -158,81 +236,41 @@ pub struct ANativeActivity {
 
 pub extern "C" fn on_window_created(activity: *mut ANativeActivity, window_ptr: *mut ANativeWindow) {
     info!("Native window created, window = {:?}", window_ptr);
-    let app = App::get_app(activity);
-    match app.window {
-        None => {
-            use surfman::{platform::android::{connection::Connection, device::NativeDevice, context::NativeContext}, GLApi,
-                          ContextAttributes, GLVersion, ContextAttributeFlags, SurfaceType, SurfaceAccess};
-
-            let connection = Connection::new().ok().unwrap();
-            let native_widget = connection.create_native_widget_from_rwh(RawWindowHandle::Android(raw_window_handle::android::AndroidHandle {
-                a_native_window: window_ptr as *mut libc::c_void,
-                ..raw_window_handle::android::AndroidHandle::empty()
-            })).ok().unwrap();
-
-            // let adapter = connection.create_low_power_adapter().unwrap();
-            // let mut device = connection.create_device(&adapter).unwrap();
-            //
-            // let context_attributes = ContextAttributes {
-            //     version: GLVersion::new(3, 0),
-            //     flags: ContextAttributeFlags::empty(),
-            // };
-            // let context_descriptor = device
-            //     .create_context_descriptor(&context_attributes)
-            //     .unwrap();
-            //
-            // let surface_type = SurfaceType::Widget { native_widget };
-            // let mut context = device.create_context(&context_descriptor, None).unwrap();
-
-            unsafe {
-                let device = connection
-                    .create_device_from_native_device(NativeDevice::current())
-                    .unwrap();
-                NativeContext::current().unwrap();
-                // let context = device
-                //     .create_context_from_native_context(NativeContext::current().unwrap())
-                //     .unwrap();
-                // let adapter = device.adapter();
-            }
-            // let surface = device
-            //     .create_surface(&context, SurfaceAccess::GPUOnly, surface_type)
-            //     .unwrap();
-            //
-            // device
-            //     .bind_surface_to_context(&mut context, surface)
-            //     .unwrap();
-            // device.make_context_current(&context).unwrap();
-
-
-            // app.window = Some(Window {
-            //     render_context: gpu::DirectContext::new_gl(None, None).unwrap(),
-            //     width: 0,
-            //     height: 0,
-            // });
-        }
-        _ => {}
-    }
+    // let app = App::get_app(activity);
+    // match app.window {
+    //     None => {}
+    //     _ => {}
+    // }
 }
 
 pub extern "C" fn on_window_resized(activity: *mut ANativeActivity, window_ptr: *mut ANativeWindow) {
-    info!("Native window resized, window = {:?}", window_ptr);
-    let app = App::get_app(activity);
-    match &mut app.window {
-        Some(window) => {
-            unsafe {
-                window.width = ANativeWindow_getWidth(window_ptr);
-                window.height = ANativeWindow_getHeight(window_ptr);
-            }
-            info!("width {:} height {:}", window.width, window.height);
-        }
-        _ => {}
+    unsafe {
+        let width = ANativeWindow_getWidth(window_ptr);
+        let height = ANativeWindow_getHeight(window_ptr);
+
+        info!("Native window resized, window = {:?}, width = {:?}, height = {:?}", window_ptr, width, height);
     }
+    let app = App::get_app(activity);
+    if let None = &app.window {
+        app.window = Some(Window::from_window_ptr(window_ptr))
+    }
+    // let app = App::get_app(activity);
+    // match &mut app.window {
+    //     Some(window) => {
+    //         unsafe {
+    //             window.width = ANativeWindow_getWidth(window_ptr);
+    //             window.height = ANativeWindow_getHeight(window_ptr);
+    //         }
+    //         info!("width {:} height {:}", window.width, window.height);
+    //     }
+    //     _ => {}
+    // }
 }
 
 pub extern "C" fn on_window_redraw(activity: *mut ANativeActivity, window_ptr: *mut ANativeWindow) {
     info!("Native window redraw, window = {:?}", window_ptr);
     let app = App::get_app(activity);
-    // app.window.as_mut().unwrap().draw();
+    app.window.as_mut().unwrap().draw();
 }
 
 #[no_mangle]

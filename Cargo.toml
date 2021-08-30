@@ -3,22 +3,18 @@ name = "rust_app"
 version = "0.0.1"
 authors = ["little-csd <littlecsd@gmail.com>"]
 edition = "2018"
+build = "build.rs"
 
 [dependencies]
 android_logger = "0.10"
 log = "0.4"
-raw-window-handle = "0.3.3"
 libc = "0.2"
-#sparkle = "0.1.25"
+khronos-egl = { version = "4.1", features = ["static", "no-pkg-config"] }
 
 [dependencies.skia-safe]
 version = "0.41.0"
 #features = ["vulkan", "gpu"]
 features = ["gl", "gpu"]
-
-[dependencies.surfman]
-version = "0.4.3"
-features = ["sm-raw-window-handle"]
 
 [lib]
 crate-type = ["cdylib"]
